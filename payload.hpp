@@ -76,13 +76,41 @@ struct XdpScreencastPortal {
 
   using THIS_CLASS = XdpScreencastPortal;
 
+  struct _XdpPortal {
+    GObject parent_instance;
+  
+    GError *init_error;
+    GDBusConnection *bus;
+  };
+
   XdpScreencastPortal() {
     portal = xdp_portal_new();
+
+    uint32_t available_cursor_modes = 0;
+    {
+      GDBusConnection *bus = ((_XdpPortal *)portal)->bus;
+      // code from obs-studio
+      g_autoptr(GError) error = NULL;
+      GDBusProxy *screencast_proxy = g_dbus_proxy_new_sync(bus, G_DBUS_PROXY_FLAGS_NONE, NULL,
+                                                           "org.freedesktop.portal.Desktop",
+                                                           "/org/freedesktop/portal/desktop",
+                                                           "org.freedesktop.portal.ScreenCast", NULL, &error);
+      g_autoptr(GVariant) cached_cursor_modes = g_dbus_proxy_get_cached_property(screencast_proxy, "AvailableCursorModes");
+      if (cached_cursor_modes) {
+        available_cursor_modes = g_variant_get_uint32(cached_cursor_modes);
+      }
+      g_clear_object(&screencast_proxy);
+    }
+
+    XdpCursorMode cursor_mode = XDP_CURSOR_MODE_HIDDEN;
+    if (available_cursor_modes & XDP_CURSOR_MODE_EMBEDDED) {
+      cursor_mode = XDP_CURSOR_MODE_EMBEDDED;
+    }
     XdpOutputType output_type = (XdpOutputType)(XdpOutputType::XDP_OUTPUT_MONITOR | XdpOutputType::XDP_OUTPUT_WINDOW);
     XdpScreencastFlags cast_flags = XdpScreencastFlags::XDP_SCREENCAST_FLAG_NONE;
-    XdpCursorMode cursor_mode = get_current_session_type() == SessionType::Wayland ? 
-                                XDP_CURSOR_MODE_EMBEDDED :
-                                XDP_CURSOR_MODE_HIDDEN;
+    // XdpCursorMode cursor_mode = get_current_session_type() == SessionType::Wayland ? 
+    //                             XDP_CURSOR_MODE_EMBEDDED :
+    //                             XDP_CURSOR_MODE_HIDDEN;
     
     // hyprland cursor mode workaround.
     // as hyprland does not support XDP_CURSOR_MODE_HIDDEN, we simply use XDP_CURSOR_MODE_EMBEDDED for it
