@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <thread>
 
 #include "format.hpp"
 #include "framebuf.hpp"
@@ -32,6 +33,10 @@ struct InterfaceSingleton{
   // the pointer to the pipewire screencast object
   // should be allocated, and freed by the hook
   std::atomic<PipewireScreenCast*> pipewire_handle{nullptr};
+
+  // the outer payload thread is owned by the hook so detach can wait until
+  // the whole screencast pipeline has fully unwound before starting again.
+  std::thread* payload_thread_handle{nullptr};
 
 
 private:

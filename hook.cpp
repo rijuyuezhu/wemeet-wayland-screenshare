@@ -54,7 +54,7 @@ void XShmAttachHook(){
   interface_singleton.portal_handle = new XdpScreencastPortal();
 
   // start the payload thread
-  std::thread payload_thread = std::thread(payload_main);
+  interface_singleton.payload_thread_handle = new std::thread(payload_main);
   fprintf(stderr, "%s", green_text("[hook] payload thread started\n").c_str());
 
   while(interface_singleton.portal_handle.load()->status.load(std::memory_order_seq_cst) == XdpScreencastPortalStatus::kInit ) {
@@ -73,7 +73,11 @@ void XShmAttachHook(){
     fprintf(stderr, "%s", red_text("[hook] portal status: " + payload_status_str + "\n").c_str());
     fprintf(stderr, "%s", red_text("[hook] <<<!!Please DO NOT cancel screencast!!>> Hook is now exiting.\n").c_str());
     // payload thread should have quitted via g_main_loop_quit
-    payload_thread.join();
+    if (interface_singleton.payload_thread_handle != nullptr && interface_singleton.payload_thread_handle->joinable()) {
+      interface_singleton.payload_thread_handle->join();
+    }
+    delete interface_singleton.payload_thread_handle;
+    interface_singleton.payload_thread_handle = nullptr;
     delete interface_singleton.interface_handle.load();
     delete interface_singleton.portal_handle.load();
     interface_singleton.interface_handle.store(nullptr);
@@ -89,8 +93,6 @@ void XShmAttachHook(){
 
   interface_singleton.pipewire_handle = new PipewireScreenCast(interface_singleton.portal_handle.load()->pipewire_fd.load(), interface_singleton.portal_handle.load()->pipewire_node_ids.at(0));
   fprintf(stderr, "%s", green_text("[hook SYNC] pipewire screencast object allocated\n").c_str());
-  
-  payload_thread.detach();
 
 }
 
@@ -260,6 +262,38 @@ void XShmDetachStopGIOLoop(){
   return;
 }
 
+void XShmDetachClosePortalSession(){
+  auto& interface_singleton = InterfaceSingleton::getSingleton();
+  auto* portal_handle = interface_singleton.portal_handle.load();
+  if (portal_handle == nullptr) {
+    return;
+  }
+
+  auto* session = portal_handle->session.load(std::memory_order_seq_cst);
+  if (session == nullptr || xdp_session_get_session_state(session) == XDP_SESSION_CLOSED) {
+    return;
+  }
+
+  // Tear down the portal session before the GIO loop disappears so the
+  // backend can fully release the old screencast before the next share starts.
+  xdp_session_close(session);
+}
+
+void XShmDetachJoinPayloadThread(){
+  auto& interface_singleton = InterfaceSingleton::getSingleton();
+  auto* payload_thread = interface_singleton.payload_thread_handle;
+  if (payload_thread == nullptr) {
+    return;
+  }
+
+  if (payload_thread->joinable()) {
+    payload_thread->join();
+  }
+
+  delete payload_thread;
+  interface_singleton.payload_thread_handle = nullptr;
+}
+
 void XShmDetachHook(){
 
   auto& interface_singleton = InterfaceSingleton::getSingleton();
@@ -269,18 +303,15 @@ void XShmDetachHook(){
   if (interface_singleton.interface_handle != nullptr){
 
     XShmDetachStopPWLoop();
+    XShmDetachClosePortalSession();
     XShmDetachStopGIOLoop();
+    XShmDetachJoinPayloadThread();
 
     // normal de-initialize interface singleton:
     // (1) free the interface object
-    delete interface_singleton.interface_handle.load();
-    interface_singleton.interface_handle.store(nullptr);
+    delete interface_singleton.interface_handle.exchange(nullptr);
     // (2) free the screencast portal object
-    delete interface_singleton.portal_handle.load();
-    interface_singleton.portal_handle.store(nullptr);
-    // (3) free the pipewire screencast object
-    delete interface_singleton.pipewire_handle.load();
-    interface_singleton.pipewire_handle.store(nullptr);
+    delete interface_singleton.portal_handle.exchange(nullptr);
   } else {
     // we do nothing here since the objects (interface, portal) are already freed,
     // and pipewire object has never been created

@@ -254,7 +254,6 @@ constexpr int PW_MIN_CALLTIME_MS = 1000 / PW_MAX_CALLRATE;
 
 std::thread payload_start_pipewire_thread(){
   auto& interface_singleton = InterfaceSingleton::getSingleton();
-  auto* pipewire_handle = interface_singleton.pipewire_handle.load();
   // this thread is going to be trapped in the pipewire mainloop
   std::thread pipewire_thread = std::thread(
     [](){
@@ -264,6 +263,7 @@ std::thread payload_start_pipewire_thread(){
         pw_loop_iterate(pw_main_loop_get_loop(pipewire_handle->pw_mainloop), 0);
         std::this_thread::sleep_for(std::chrono::milliseconds(PW_MIN_CALLTIME_MS));
       }
+      delete interface_singleton.pipewire_handle.exchange(nullptr);
       fprintf(stderr, "%s", green_text("[payload] pw stop signal received. pw stopped. \n").c_str());
     }
   );
@@ -273,7 +273,6 @@ std::thread payload_start_pipewire_thread(){
 
 
 // this payload_main will be executed by the payload_thread, which is created in XShmAttachHook
-// and this thread will be detached immediately after creation
 void payload_main(){
 
 

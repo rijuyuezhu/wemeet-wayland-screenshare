@@ -10,6 +10,7 @@
 #include <libportal/portal.h>
 
 #include <memory>
+#include <mutex>
 #include <pipewire-0.3/pipewire/pipewire.h>
 #include <spa/param/video/format-utils.h>
 #include <spa/debug/pod.h>
@@ -181,7 +182,9 @@ struct PipewireScreenCast {
     processed_frame_count(0)
   {
     reset_last_frame_time();
-    pw_init(nullptr, nullptr);
+    std::call_once(pipewire_init_once, [](){
+      pw_init(nullptr, nullptr);
+    });
     pw_mainloop = pw_main_loop_new(nullptr);
     pw_loop* pw_mainloop_loop = pw_main_loop_get_loop(pw_mainloop);
     context = pw_context_new(pw_mainloop_loop, nullptr, 0);
@@ -189,6 +192,7 @@ struct PipewireScreenCast {
     registry = pw_core_get_registry(core, PW_VERSION_REGISTRY, 0);
 
     spa_zero(registry_listener);
+    spa_zero(listener);
     pw_registry_add_listener(registry, &registry_listener, &registry_events, this);
   }
 
@@ -257,12 +261,12 @@ struct PipewireScreenCast {
   static constexpr pw_registry_events registry_events{ PW_VERSION_REGISTRY_EVENTS, THIS_CLASS::registry_global };
 
   ~PipewireScreenCast() {
-    if (stream) pw_stream_disconnect(stream);
+    if (stream) spa_hook_remove(&listener);
+    if (registry) spa_hook_remove(&registry_listener);
     if (stream) pw_stream_destroy(stream);
-    if (core) pw_core_disconnect(core);
+    if (registry) pw_proxy_destroy(reinterpret_cast<pw_proxy*>(registry));
     if (context) pw_context_destroy(context);
     if (pw_mainloop) pw_main_loop_destroy(pw_mainloop);
-    pw_deinit();
   }
 
   void reset_last_frame_time() {
@@ -274,12 +278,13 @@ struct PipewireScreenCast {
 
   std::atomic<pw_main_loop*> pw_mainloop{nullptr}; // need to be freed using pw_main_loop_destroy
   std::atomic<pw_context*> context{nullptr}; // need to be freed using pw_context_destroy
-  std::atomic<pw_core*> core{nullptr}; // need to be freed using pw_core_disconnect
+  std::atomic<pw_core*> core{nullptr};
   std::atomic<pw_stream*> stream{nullptr}; // need to be freed using pw_stream_destroy
 
 private:
+  inline static std::once_flag pipewire_init_once;
   int node_id;
-  pw_registry *registry;
+  pw_registry *registry{nullptr};
   spa_hook registry_listener;
   std::unique_ptr<uint8_t[]> param_buffer{nullptr};
   static constexpr size_t param_buffer_size = 1024;
