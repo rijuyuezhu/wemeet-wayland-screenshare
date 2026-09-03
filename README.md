@@ -52,7 +52,7 @@ yay -S wemeet-bin
 
 ```bash
 sudo pacman -S wireplumber
-sudo pacman -S libportal xdg-desktop-portal xdg-desktop-portal-impl xwaylandvideobridge opencv
+sudo pacman -S libportal xdg-desktop-portal xdg-desktop-portal-impl xwaylandvideobridge
 ```
 
 - 注意：本项目在之前的版本中必须依赖于`pipewire-media-session`. 而现在经过测试已经确定`wireplumber`下可用. 如果系统中已经安装`pipewire-media-session`，pacman会在安装`wireplumber`时提示替换，你基本可以毫无顾虑地同意替换. 关于此问题具体的implication，还请自行查阅相关资料.

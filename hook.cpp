@@ -1,4 +1,5 @@
 
+#include <cstring>
 #include <string>
 #include <thread>
 #include <tuple>
@@ -7,9 +8,6 @@
 #include <sys/wait.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
-
-// got to include this before X11 headers
-#include "hook_opencv.hpp"
 
 #include <X11/Xlib.h>
 
@@ -34,8 +32,8 @@
 
 */
 
-// #define STB_IMAGE_RESIZE_IMPLEMENTATION
-// #include <stb/stb_image_resize2.h>
+#define STB_IMAGE_RESIZE_IMPLEMENTATION
+#include "stb/stb_image_resize2.h"
 
 constexpr uint32_t DEFAULT_FRAME_HEIGHT = 1080;
 constexpr uint32_t DEFAULT_FRAME_WIDTH = 1920;
@@ -151,12 +149,10 @@ void XShmGetImageHook(XImage& image){
   auto ximage_height = image.height;
   size_t ximage_bytes_per_line = image.bytes_per_line;
 
-  CvMat ximage_cvmat;
-  OpencvDLFCNSingleton::cvInitMatHeader(
-    &ximage_cvmat, ximage_height, ximage_width,
-    CV_8UC4, image.data, ximage_bytes_per_line
-  );
-  OpencvDLFCNSingleton::cvSetZero(&ximage_cvmat);
+  if (ximage_spa_format == SpaVideoFormat_e::INVALID || image.data == nullptr) {
+    return;
+  }
+  std::memset(image.data, 0, ximage_bytes_per_line * ximage_height);
 
   auto& framebuffer = interface_singleton.interface_handle.load()->framebuf;
   auto framebuffer_spa_format = framebuffer.format;
@@ -164,27 +160,20 @@ void XShmGetImageHook(XImage& image){
   auto framebuffer_height = framebuffer.height;
   auto framebuffer_row_byte_stride = framebuffer.row_byte_stride;
 
-  CvMat framebuffer_cvmat;
-  OpencvDLFCNSingleton::cvInitMatHeader(
-    &framebuffer_cvmat, framebuffer_height, framebuffer_width,
-    CV_8UC4, framebuffer.data.get(), framebuffer_row_byte_stride
-  );
-  CvMat *framebuffer_cvmat_ptr = &framebuffer_cvmat;
+  const uint8_t* framebuffer_data = framebuffer.data.get();
   if (framebuffer.crop_height && framebuffer.crop_width) {
-    OpencvDLFCNSingleton::cvGetSubRect(framebuffer_cvmat_ptr, framebuffer_cvmat_ptr, {framebuffer.crop_x, framebuffer.crop_y, framebuffer.crop_width, framebuffer.crop_height});
+    framebuffer_data += framebuffer.crop_y * framebuffer_row_byte_stride
+      + framebuffer.crop_x * spa_videoformat_bytesize(framebuffer_spa_format);
     framebuffer_width = framebuffer.crop_width;
     framebuffer_height = framebuffer.crop_height;
   }
-  if (framebuffer.rotate) {
-    if (framebuffer.rotate != 180) {
-      std::swap(framebuffer_width, framebuffer_height);
-    }
-    CvMat *framebuffer_cvmat_rotated = OpencvDLFCNSingleton::cvCreateMat(framebuffer_height, framebuffer_width, CV_8UC4);
-    OpencvDLFCNSingleton::cvRotate(framebuffer_cvmat_ptr, framebuffer_cvmat_rotated, framebuffer.rotate);
-    framebuffer_cvmat_ptr = framebuffer_cvmat_rotated;
-  }
-  if (framebuffer.flip) {
-    OpencvDLFCNSingleton::cvFlip(framebuffer_cvmat_ptr);
+
+  // The common XWayland path is 32-bit BGR(A/X) on both sides. Keep this
+  // compatibility hook intentionally small; transformed PipeWire frames can
+  // be handled separately if they become relevant again.
+  if (framebuffer.rotate || framebuffer.flip ||
+      spa_videoformat_bytesize(framebuffer_spa_format) != spa_videoformat_bytesize(ximage_spa_format)) {
+    return;
   }
 
   
@@ -192,46 +181,18 @@ void XShmGetImageHook(XImage& image){
   auto [ximage_width_offset, ximage_height_offset, target_width, target_height] = get_resize_param(
     ximage_width, ximage_height, framebuffer_width, framebuffer_height
   );
-  CvMat ximage_cvmat_roi;
-  OpencvDLFCNSingleton::cvGetSubRect(
-    &ximage_cvmat, &ximage_cvmat_roi,
-    cvRect(ximage_width_offset, ximage_height_offset, target_width, target_height)
+  auto* output = reinterpret_cast<uint8_t*>(image.data)
+    + ximage_height_offset * ximage_bytes_per_line
+    + ximage_width_offset * spa_videoformat_bytesize(ximage_spa_format);
+  const auto pixel_layout = spa_videoformat_bytesize(ximage_spa_format) == 4
+    ? STBIR_4CHANNEL : STBIR_RGB;
+  stbir_resize_uint8_srgb(
+    framebuffer_data,
+    framebuffer_width, framebuffer_height, framebuffer_row_byte_stride,
+    output,
+    target_width, target_height, ximage_bytes_per_line,
+    pixel_layout
   );
-  OpencvDLFCNSingleton::cvResize(
-    framebuffer_cvmat_ptr, &ximage_cvmat_roi, CV_INTER_LINEAR
-  );
-  
-  if (framebuffer_cvmat_ptr != &framebuffer_cvmat) {
-    OpencvDLFCNSingleton::cvReleaseMat(&framebuffer_cvmat_ptr);
-  }
-
-  // do color convert
-  // here the code is currently mainly for wlroot WMs
-  // maybe we could shortcut this by detecting WM?
-
-  int cv_cAPI_color_cvt_code = get_opencv_cAPI_color_convert_code(
-    framebuffer_spa_format, ximage_spa_format
-  );
-
-  if (cv_cAPI_color_cvt_code != -1){
-    // non -1 code means color conversion is needed
-    OpencvDLFCNSingleton::cvCvtColor(
-      &ximage_cvmat_roi, &ximage_cvmat_roi, cv_cAPI_color_cvt_code
-    );
-  }
-
-  // legacy stb implementation
-  // resize the framebuffer to ximage size
-  // note: by using STBIR_BGRA_PM we are essentially ignoring the alpha channel
-  // heck, I don't even know if the alpha channel is used in the first place
-  // Anyway, we are just going to ignore it for now since this will be much faster
-  // stbir_resize_uint8_srgb(
-  //   reinterpret_cast<uint8_t*>(framebuffer.data.get()),
-  //   framebuffer_width, framebuffer_height, framebuffer_row_byte_stride,
-  //   reinterpret_cast<uint8_t*>(image.data),
-  //   ximage_width, ximage_height, ximage_bytes_per_line,
-  //   stbir_pixel_layout::STBIR_BGRA_PM
-  // );
 
 
   return;
